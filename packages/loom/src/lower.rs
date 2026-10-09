@@ -2128,6 +2128,27 @@ impl<'a> Graph<'a> {
             }
             ExprKind::Member(target, field) => {
                 let object = self.expr(target)?;
+                if let (Ty::Struct(path), ExprKind::Member(holder, _)) = (&object.ty, &target.kind) {
+                    // A field of an object's struct property is set in place: the property's
+                    // getter feeds Set Members by reference, so the struct is not copied out and
+                    // written back whole (costly, and unsafe, for a large struct the game owns).
+                    let path = path.clone();
+                    if self.db().native_make(&path).is_none() && matches!(self.expr_type_of_target(holder, span), Ok(Ty::Object(_))) {
+                        let Some(field_ty) = self.db().field(&path, field) else {
+                            bail!("{span}: {} has no field {field} that Blueprints can set", short(&path));
+                        };
+                        if self.db().field_read_only(&path, field) {
+                            bail!("{span}: {}'s {field} is read-only, so Blueprints can read it but not set it", short(&path));
+                        }
+                        let value = self.arg(value, &field_ty)?;
+                        self.check(&value, &field_ty, span, field)?;
+                        let node = self.node("set", NodeKind::SetFields { r#struct: path.clone(), fields: vec![field.clone()] });
+                        self.chain(&node, Some("then"));
+                        self.feed(object.source, pin(&node, "StructRef"));
+                        self.feed(value.source, pin(&node, field));
+                        return Ok(());
+                    }
+                }
                 if let Ty::Struct(_) = &object.ty {
                     // A field of a struct that is not a variable of its own, such as an object's
                     // property or an array's item: the struct is copied into a local, the field is
